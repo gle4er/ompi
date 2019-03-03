@@ -28,6 +28,8 @@ static inline int bcast_sched_chain(int rank, int p, int root, NBC_Schedule *sch
                                     MPI_Datatype datatype, int fragsize, size_t size);
 static inline int bcast_sched_knomial(int rank, int comm_size, int root, NBC_Schedule *schedule, void *buf,
                                       int count, MPI_Datatype datatype, int knomial_radix);
+static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int root, NBC_Schedule *schedule, 
+                                                void *buf, int count, MPI_Datatype datatype);
 
 #ifdef NBC_CACHE_SCHEDULE
 /* tree comparison function for schedule cache */
@@ -126,20 +128,22 @@ static int nbc_bcast_init(void *buffer, int count, MPI_Datatype datatype, int ro
       return OMPI_ERR_OUT_OF_RESOURCE;
     }
 
-    switch(alg) {
-      case NBC_BCAST_LINEAR:
-        res = bcast_sched_linear(rank, p, root, schedule, buffer, count, datatype);
-        break;
-      case NBC_BCAST_BINOMIAL:
-        res = bcast_sched_binomial(rank, p, root, schedule, buffer, count, datatype);
-        break;
-      case NBC_BCAST_CHAIN:
-        res = bcast_sched_chain(rank, p, root, schedule, buffer, count, datatype, segsize, size);
-        break;
-      case NBC_BCAST_KNOMIAL:
-        res = bcast_sched_knomial(rank, p, root, schedule, buffer, count, datatype, libnbc_ibcast_knomial_radix);
-        break;
-    }
+    res = bcast_sched_scatter_allgather(rank, p, root, schedule, buffer, count, datatype);
+
+    /*switch(alg) {*/
+      /*case NBC_BCAST_LINEAR:*/
+        /*res = bcast_sched_linear(rank, p, root, schedule, buffer, count, datatype);*/
+        /*break;*/
+      /*case NBC_BCAST_BINOMIAL:*/
+        /*res = bcast_sched_binomial(rank, p, root, schedule, buffer, count, datatype);*/
+        /*break;*/
+      /*case NBC_BCAST_CHAIN:*/
+        /*res = bcast_sched_chain(rank, p, root, schedule, buffer, count, datatype, segsize, size);*/
+        /*break;*/
+      /*case NBC_BCAST_KNOMIAL:*/
+        /*res = bcast_sched_knomial(rank, p, root, schedule, buffer, count, datatype, libnbc_ibcast_knomial_radix);*/
+        /*break;*/
+    /*}*/
 
     if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
       OBJ_RELEASE(schedule);
@@ -498,6 +502,62 @@ int ompi_coll_libnbc_bcast_inter_init(void *buffer, int count, MPI_Datatype data
                                    comm, request, module, true);
     if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
         return res;
+    }
+
+    return OMPI_SUCCESS;
+}
+
+static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int root, NBC_Schedule *schedule, 
+                                                void *buf, int count, MPI_Datatype datatype)
+{
+    size_t datatype_size;
+    ompi_datatype_type_size(datatype, &datatype_size);
+    if (comm_size < 2 || datatype_size == 0) {
+        return MPI_SUCCESS;
+    }
+
+    int vrank = rank;
+    RANK2VRANK(rank, vrank, root);
+
+    ptrdiff_t lb, extent;
+    ompi_datatype_get_extent(datatype, &lb, &extent);
+
+    int scatter_count = (count + comm_size - 1) / comm_size; /* ceil(count / comm_size) */
+
+    //TODO: vrank to rank????
+    /* Scatter by binomial tree: recieve data from parent processes */
+    for (int mask = 0x1; mask <= rank; mask <<= 1) {
+        if ((rank ^ mask) > rank) {
+            continue;
+        }
+        int recv_rank = vrank ^ mask;
+        int recv_cnt = (vrank == comm_size - 1) 
+            ? count - vrank * scatter_count 
+            : mask * scatter_count;
+        int res = NBC_Sched_recv((char *)buf + (ptrdiff_t)vrank * scatter_count * extent,
+                                 false, recv_cnt, datatype, recv_rank, schedule, true);
+        if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+            return res;
+        }
+        break;
+    }
+
+    /* Scatter by binomial tree: send data to child processes */
+    for (int mask = 0x1; (mask | vrank) < comm_size; mask <<= 1) {
+        if ((vrank | mask) == vrank) {
+            break;
+        }
+        int send_rank = vrank | mask;
+        int send_cnt = (send_rank == comm_size - 1)
+            ? count - send_rank * scatter_count
+            : mask * scatter_count;
+        if (send_cnt > 0) {
+            int res = NBC_Sched_send((char *)buf + (ptrdiff_t)send_rank * scatter_count * extent,
+                    false, send_cnt, datatype, send_rank, schedule, false);
+            if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                return res;
+            }
+        }
     }
 
     return OMPI_SUCCESS;
