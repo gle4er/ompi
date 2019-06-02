@@ -525,6 +525,7 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
     int scatter_count = (count + comm_size - 1) / comm_size; /* ceil(count / comm_size) */
 
     //TODO: vrank to rank????
+
     /* Scatter by binomial tree: recieve data from parent processes */
     for (int mask = 0x1; mask <= rank; mask <<= 1) {
         if ((rank ^ mask) > rank) {
@@ -534,10 +535,12 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
         int recv_cnt = (vrank == comm_size - 1) 
             ? count - vrank * scatter_count 
             : mask * scatter_count;
-        int res = NBC_Sched_recv((char *)buf + (ptrdiff_t)vrank * scatter_count * extent,
-                                 false, recv_cnt, datatype, recv_rank, schedule, true);
-        if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
-            return res;
+        if (recv_cnt > 0) {
+            int res = NBC_Sched_recv((char *)buf + (ptrdiff_t)vrank * scatter_count * extent,
+                    false, recv_cnt, datatype, recv_rank, schedule, true);
+            if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                return res;
+            }
         }
         break;
     }
@@ -556,6 +559,57 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
                     false, send_cnt, datatype, send_rank, schedule, false);
             if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
                 return res;
+            }
+        }
+    }
+
+    /*
+     * Allgather by recursive doubling
+     * Each process has the curr_count elems in the buf[vrank * scatter_count, ...]
+     */
+
+    //TODO: non-power-of-two case
+    int per_rank_count[comm_size];
+    for (int curr_rank = 0; curr_rank < comm_size; curr_rank++) {
+        int rem_count = count - curr_rank * scatter_count;
+        int curr_count = (scatter_count < rem_count)
+            ? scatter_count
+            : rem_count;
+        if (curr_count < 0)
+            curr_count = 0;
+        per_rank_count[curr_rank] = curr_count;
+    }
+
+    for (int mask = 0x1; mask < comm_size; mask <<= 1) {
+        int vremote = vrank ^ mask;
+        int remote = (vremote + root) % comm_size;
+
+        int vrank_tree_root = (int)(vrank / mask) * mask; /* floor(vrank / mask * mask) */
+        int vremote_tree_root = (int)(vremote / mask) * mask;
+
+        if (vremote < comm_size) {
+            ptrdiff_t send_offset = vrank_tree_root * scatter_count * extent;
+            ptrdiff_t recv_offset = vremote_tree_root * scatter_count * extent;
+            int curr_count = per_rank_count[vrank_tree_root];
+            int recv_cnt = per_rank_count[vremote_tree_root];
+            int res = NBC_Sched_send((char *)buf + send_offset, false, curr_count, datatype, remote, schedule, false);
+            if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                return res;
+            }
+            res = NBC_Sched_recv((char *)buf + recv_offset, false, recv_cnt, datatype, remote, schedule, true);
+            if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                return res;
+            }
+
+            int old_per_rank_count[comm_size];
+            for (int i = 0; i < comm_size; i++) {
+                old_per_rank_count[i] = per_rank_count[i];
+            }
+
+            for (int curr_rank = 0; curr_rank < comm_size; curr_rank++) {
+                int vremote = curr_rank ^ mask;
+                int vremote_tree_root = (int)(vremote / mask) * mask;
+                per_rank_count[curr_rank] += old_per_rank_count[vremote_tree_root];
             }
         }
     }
