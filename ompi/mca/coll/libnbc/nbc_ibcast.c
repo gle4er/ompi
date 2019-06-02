@@ -527,11 +527,12 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
     //TODO: vrank to rank????
 
     /* Scatter by binomial tree: recieve data from parent processes */
-    for (int mask = 0x1; mask <= rank; mask <<= 1) {
-        if ((rank ^ mask) > rank) {
+    for (int mask = 0x1; mask <= vrank; mask <<= 1) {
+        if ((vrank ^ mask) > vrank) {
             continue;
         }
-        int recv_rank = vrank ^ mask;
+        int recv_rank;
+        VRANK2RANK(recv_rank, (vrank ^ mask), root);
         int recv_cnt = (vrank == comm_size - 1) 
             ? count - vrank * scatter_count 
             : mask * scatter_count;
@@ -550,12 +551,14 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
         if ((vrank | mask) == vrank) {
             break;
         }
-        int send_rank = vrank | mask;
-        int send_cnt = (send_rank == comm_size - 1)
-            ? count - send_rank * scatter_count
+        int send_rank;
+        VRANK2RANK(send_rank, (vrank | mask), root);
+        int send_gap = vrank | mask;
+        int send_cnt = (send_gap == comm_size - 1)
+            ? count - send_gap * scatter_count
             : mask * scatter_count;
         if (send_cnt > 0) {
-            int res = NBC_Sched_send((char *)buf + (ptrdiff_t)send_rank * scatter_count * extent,
+            int res = NBC_Sched_send((char *)buf + (ptrdiff_t)send_gap * scatter_count * extent,
                     false, send_cnt, datatype, send_rank, schedule, false);
             if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
                 return res;
