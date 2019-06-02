@@ -13,12 +13,13 @@
  * Copyright (c) 2011-2018 Cisco Systems, Inc.  All rights reserved
  * Copyright (c) 2012-2017 Los Alamos National Security, LLC.
  *                         All rights reserved.
- * Copyright (c) 2013-2018 Intel, Inc. All rights reserved.
+ * Copyright (c) 2013-2019 Intel, Inc.  All rights reserved.
  * Copyright (c) 2015-2017 Research Organization for Information Science
  *                         and Technology (RIST). All rights reserved.
- * Copyright (C) 2018      Mellanox Technologies, Ltd. 
+ * Copyright (C) 2018      Mellanox Technologies, Ltd.
  *                         All rights reserved.
  * Copyright (c) 2018      Amazon.com, Inc. or its affiliates.  All Rights reserved.
+ * Copyright (c) 2019 IBM Corporation. All rights reserved.
  * $COPYRIGHT$
  *
  * Additional copyrights may follow
@@ -764,15 +765,34 @@ static hwloc_obj_t df_search(hwloc_topology_t topo,
         return found;
     }
     if (OPAL_HWLOC_AVAILABLE == rtype) {
+// The previous (3.x) code included a check for
+// available = opal_hwloc_base_get_available_cpus(topo, start)
+// and skipped objs that had hwloc_bitmap_iszero(available)
+        hwloc_obj_t root;
+        opal_hwloc_topo_data_t *rdata;
+        root = hwloc_get_root_obj(topo);
+        rdata = (opal_hwloc_topo_data_t*)root->userdata;
+        hwloc_cpuset_t constrained_cpuset;
+
+        constrained_cpuset = hwloc_bitmap_alloc();
+        if (rdata && rdata->available) {
+            hwloc_bitmap_and(constrained_cpuset, start->cpuset, rdata->available);
+        } else {
+            hwloc_bitmap_copy(constrained_cpuset, start->cpuset);
+        }
+
         unsigned idx = 0;
         if (num_objs)
-            *num_objs = hwloc_get_nbobjs_inside_cpuset_by_depth(topo, start->cpuset, search_depth);
+            *num_objs = hwloc_get_nbobjs_inside_cpuset_by_depth(topo, constrained_cpuset, search_depth);
         obj = NULL;
-        while ((obj = hwloc_get_next_obj_inside_cpuset_by_depth(topo, start->cpuset, search_depth, obj)) != NULL) {
-            if (idx == nobj)
+        while ((obj = hwloc_get_next_obj_inside_cpuset_by_depth(topo, constrained_cpuset, search_depth, obj)) != NULL) {
+            if (idx == nobj) {
+                hwloc_bitmap_free(constrained_cpuset);
                 return obj;
+            }
             idx++;
         }
+        hwloc_bitmap_free(constrained_cpuset);
         return NULL;
     }
     return NULL;
@@ -1728,14 +1748,14 @@ int opal_hwloc_base_cset2str(char *str, int len,
         for (core_index = 0; core_index < num_cores; ++core_index) {
             if (map[socket_index][core_index] > 0) {
                 if (!first) {
-                    strncat(str, ", ", len - strlen(str));
+                    strncat(str, ", ", len - strlen(str) - 1);
                 }
                 first = false;
 
                 snprintf(tmp, stmp, "socket %d[core %d[hwt %s]]",
                          socket_index, core_index,
                          bitmap2rangestr(map[socket_index][core_index]));
-                strncat(str, tmp, len - strlen(str));
+                strncat(str, tmp, len - strlen(str) - 1);
             }
         }
     }
@@ -1791,7 +1811,7 @@ int opal_hwloc_base_cset2mapstr(char *str, int len,
     for (socket = hwloc_get_obj_by_type(topo, HWLOC_OBJ_SOCKET, 0);
          NULL != socket;
          socket = socket->next_cousin) {
-        strncat(str, "[", len - strlen(str));
+        strncat(str, "[", len - strlen(str) - 1);
 
         /* Iterate over all existing cores in this socket */
         core_index = 0;
@@ -1803,7 +1823,7 @@ int opal_hwloc_base_cset2mapstr(char *str, int len,
                                                         socket->cpuset,
                                                         HWLOC_OBJ_CORE, ++core_index)) {
             if (core_index > 0) {
-                strncat(str, "/", len - strlen(str));
+                strncat(str, "/", len - strlen(str) - 1);
             }
 
             /* Iterate over all existing PUs in this core */
@@ -1818,13 +1838,13 @@ int opal_hwloc_base_cset2mapstr(char *str, int len,
 
                 /* Is this PU in the cpuset? */
                 if (hwloc_bitmap_isset(cpuset, pu->os_index)) {
-                    strncat(str, "B", len - strlen(str));
+                    strncat(str, "B", len - strlen(str) - 1);
                 } else {
-                    strncat(str, ".", len - strlen(str));
+                    strncat(str, ".", len - strlen(str) - 1);
                 }
             }
         }
-        strncat(str, "]", len - strlen(str));
+        strncat(str, "]", len - strlen(str) - 1);
     }
 
     return OPAL_SUCCESS;
@@ -1857,8 +1877,9 @@ static void sort_by_dist(hwloc_topology_t topo, char* device_name, opal_list_t *
     hwloc_obj_t root = NULL;
     int depth;
     unsigned i;
-#endif
+#else
     unsigned distances_nr = 0;
+#endif
 
     for (device_obj = hwloc_get_obj_by_type(topo, HWLOC_OBJ_OS_DEVICE, 0); device_obj; device_obj = hwloc_get_next_osdev(topo, device_obj)) {
         if (device_obj->attr->osdev.type == HWLOC_OBJ_OSDEV_OPENFABRICS
@@ -1889,7 +1910,7 @@ static void sort_by_dist(hwloc_topology_t topo, char* device_name, opal_list_t *
 
                 /* find distance matrix for all numa nodes */
 #if HWLOC_API_VERSION < 0x20000
-                distances = hwloc_get_whole_distance_matrix_by_type(topo, HWLOC_OBJ_NODE);
+                distances = (struct hwloc_distances_s*)hwloc_get_whole_distance_matrix_by_type(topo, HWLOC_OBJ_NODE);
                 if (NULL ==  distances) {
                     /* we can try to find distances under group object. This info can be there. */
                     depth = hwloc_get_type_depth(topo, HWLOC_OBJ_NODE);

@@ -91,23 +91,23 @@ OPAL_DECLSPEC void opal_common_ucx_mca_register(void)
     opal_common_ucx.output = opal_output_open(NULL);
     opal_output_set_verbosity(opal_common_ucx.output, opal_common_ucx.verbose);
 
-    ret = mca_base_framework_open(&opal_memory_base_framework, 0);
-    if (OPAL_SUCCESS != ret) {
-        /* failed to initialize memory framework - just exit */
-        MCA_COMMON_UCX_VERBOSE(1, "failed to initialize memory base framework: %d, "
-                                  "memory hooks will not be used", ret);
-        return;
-    }
-
     /* Set memory hooks */
-    if (opal_common_ucx.opal_mem_hooks &&
-        (OPAL_MEMORY_FREE_SUPPORT | OPAL_MEMORY_MUNMAP_SUPPORT) ==
-        ((OPAL_MEMORY_FREE_SUPPORT | OPAL_MEMORY_MUNMAP_SUPPORT) &
-         opal_mem_hooks_support_level()))
-    {
-        MCA_COMMON_UCX_VERBOSE(1, "%s", "using OPAL memory hooks as external events");
-        ucm_set_external_event(UCM_EVENT_VM_UNMAPPED);
-        opal_mem_hooks_register_release(opal_common_ucx_mem_release_cb, NULL);
+    if (opal_common_ucx.opal_mem_hooks) {
+        ret = mca_base_framework_open(&opal_memory_base_framework, 0);
+        if (OPAL_SUCCESS != ret) {
+            /* failed to initialize memory framework - just exit */
+            MCA_COMMON_UCX_VERBOSE(1, "failed to initialize memory base framework: %d, "
+                                      "memory hooks will not be used", ret);
+            return;
+        }
+
+        if ((OPAL_MEMORY_FREE_SUPPORT | OPAL_MEMORY_MUNMAP_SUPPORT) ==
+            ((OPAL_MEMORY_FREE_SUPPORT | OPAL_MEMORY_MUNMAP_SUPPORT) &
+             opal_mem_hooks_support_level())) {
+            MCA_COMMON_UCX_VERBOSE(1, "%s", "using OPAL memory hooks as external events");
+            ucm_set_external_event(UCM_EVENT_VM_UNMAPPED);
+            opal_mem_hooks_register_release(opal_common_ucx_mem_release_cb, NULL);
+        }
     }
 }
 
@@ -130,6 +130,32 @@ void opal_common_ucx_empty_complete_cb(void *request, ucs_status_t status)
 static void opal_common_ucx_mca_fence_complete_cb(int status, void *fenced)
 {
     *(int*)fenced = 1;
+}
+
+void opal_common_ucx_mca_proc_added(void)
+{
+#if HAVE_DECL_UCM_TEST_EVENTS
+    static int warned = 0;
+    static char *mem_hooks_suggestion = "Pls try adding --mca opal_common_ucx_opal_mem_hooks 1 "
+                                        "to mpirun/oshrun command line to resolve this issue.";
+    ucs_status_t status;
+
+    if (!warned) {
+        status = ucm_test_events(UCM_EVENT_VM_UNMAPPED);
+        if (status != UCS_OK) {
+            MCA_COMMON_UCX_WARN("UCX is unable to handle VM_UNMAP event. "
+                                "This may cause performance degradation or data "
+                                "corruption. %s",
+                                opal_common_ucx.opal_mem_hooks ? "" : mem_hooks_suggestion);
+            warned = 1;
+        }
+    }
+#endif
+}
+
+OPAL_DECLSPEC int opal_common_ucx_mca_pmix_fence_nb(int *fenced)
+{
+    return opal_pmix.fence_nb(NULL, 0, opal_common_ucx_mca_fence_complete_cb, (void *)fenced);
 }
 
 OPAL_DECLSPEC int opal_common_ucx_mca_pmix_fence(ucp_worker_h worker)
@@ -161,15 +187,13 @@ static void opal_common_ucx_wait_all_requests(void **reqs, int count, ucp_worker
     }
 }
 
-OPAL_DECLSPEC int opal_common_ucx_del_procs(opal_common_ucx_del_proc_t *procs, size_t count,
-                                            size_t my_rank, size_t max_disconnect, ucp_worker_h worker)
-{
+OPAL_DECLSPEC int opal_common_ucx_del_procs_nofence(opal_common_ucx_del_proc_t *procs, size_t count,
+                                            size_t my_rank, size_t max_disconnect, ucp_worker_h worker) {
     size_t num_reqs;
     size_t max_reqs;
     void *dreq, **dreqs;
     size_t i;
     size_t n;
-    int ret = OPAL_SUCCESS;
 
     MCA_COMMON_UCX_ASSERT(procs || !count);
     MCA_COMMON_UCX_ASSERT(max_disconnect > 0);
@@ -211,10 +235,14 @@ OPAL_DECLSPEC int opal_common_ucx_del_procs(opal_common_ucx_del_proc_t *procs, s
     opal_common_ucx_wait_all_requests(dreqs, num_reqs, worker);
     free(dreqs);
 
-    if (OPAL_SUCCESS != (ret = opal_common_ucx_mca_pmix_fence(worker))) {
-        return ret;
-    }
-
     return OPAL_SUCCESS;
+}
+
+OPAL_DECLSPEC int opal_common_ucx_del_procs(opal_common_ucx_del_proc_t *procs, size_t count,
+                                            size_t my_rank, size_t max_disconnect, ucp_worker_h worker)
+{
+    opal_common_ucx_del_procs_nofence(procs, count, my_rank, max_disconnect, worker);
+
+    return opal_common_ucx_mca_pmix_fence(worker);
 }
 

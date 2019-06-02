@@ -45,6 +45,7 @@ static void mca_coll_hcoll_module_clear(mca_coll_hcoll_module_t *hcoll_module)
     hcoll_module->previous_allgatherv = NULL;
     hcoll_module->previous_gather     = NULL;
     hcoll_module->previous_gatherv    = NULL;
+    hcoll_module->previous_scatterv   = NULL;
     hcoll_module->previous_alltoall   = NULL;
     hcoll_module->previous_alltoallv  = NULL;
     hcoll_module->previous_alltoallw  = NULL;
@@ -68,6 +69,7 @@ static void mca_coll_hcoll_module_clear(mca_coll_hcoll_module_t *hcoll_module)
     hcoll_module->previous_allgatherv_module = NULL;
     hcoll_module->previous_gather_module     = NULL;
     hcoll_module->previous_gatherv_module    = NULL;
+    hcoll_module->previous_scatterv_module    = NULL;
     hcoll_module->previous_alltoall_module   = NULL;
     hcoll_module->previous_alltoallv_module  = NULL;
     hcoll_module->previous_alltoallw_module  = NULL;
@@ -120,6 +122,7 @@ static void mca_coll_hcoll_module_destruct(mca_coll_hcoll_module_t *hcoll_module
         OBJ_RELEASE_IF_NOT_NULL(hcoll_module->previous_allgather_module);
         OBJ_RELEASE_IF_NOT_NULL(hcoll_module->previous_allgatherv_module);
         OBJ_RELEASE_IF_NOT_NULL(hcoll_module->previous_gatherv_module);
+        OBJ_RELEASE_IF_NOT_NULL(hcoll_module->previous_scatterv_module);
         OBJ_RELEASE_IF_NOT_NULL(hcoll_module->previous_alltoall_module);
         OBJ_RELEASE_IF_NOT_NULL(hcoll_module->previous_alltoallv_module);
         OBJ_RELEASE_IF_NOT_NULL(hcoll_module->previous_reduce_module);
@@ -174,6 +177,7 @@ static int mca_coll_hcoll_save_coll_handlers(mca_coll_hcoll_module_t *hcoll_modu
     HCOL_SAVE_PREV_COLL_API(allgather);
     HCOL_SAVE_PREV_COLL_API(allgatherv);
     HCOL_SAVE_PREV_COLL_API(gatherv);
+    HCOL_SAVE_PREV_COLL_API(scatterv);
     HCOL_SAVE_PREV_COLL_API(alltoall);
     HCOL_SAVE_PREV_COLL_API(alltoallv);
 
@@ -301,17 +305,28 @@ mca_coll_hcoll_comm_query(struct ompi_communicator_t *comm, int *priority)
             HCOL_ERROR("Hcol library init failed");
             return NULL;
         }
-
 #if HCOLL_API >= HCOLL_VERSION(3,2)
-        if (cm->using_mem_hooks && cm->init_opts->mem_hook_needed) {
+        if (cm->init_opts->mem_hook_needed) {
 #else
-        if (cm->using_mem_hooks && hcoll_check_mem_release_cb_needed()) {
+        if (hcoll_check_mem_release_cb_needed()) {
 #endif
-            opal_mem_hooks_register_release(mca_coll_hcoll_mem_release_cb, NULL);
+            rc = mca_base_framework_open(&opal_memory_base_framework, 0);
+            if (OPAL_SUCCESS != rc) {
+                HCOL_VERBOSE(1, "failed to initialize memory base framework: %d, "
+                             "memory hooks will not be used", rc);
+            } else {
+                if ((OPAL_MEMORY_FREE_SUPPORT | OPAL_MEMORY_MUNMAP_SUPPORT) ==
+                    ((OPAL_MEMORY_FREE_SUPPORT | OPAL_MEMORY_MUNMAP_SUPPORT) &
+                     opal_mem_hooks_support_level())) {
+                    HCOL_VERBOSE(1, "using OPAL memory hooks as external events");
+                    cm->using_mem_hooks = 1;
+                    opal_mem_hooks_register_release(mca_coll_hcoll_mem_release_cb, NULL);
+                    setenv("MXM_HCOLL_MEM_ON_DEMAND_MAP", "y", 0);
+                }
+            }
         } else {
             cm->using_mem_hooks = 0;
         }
-
         copy_fn.attr_communicator_copy_fn = (MPI_Comm_internal_copy_attr_function*) MPI_COMM_NULL_COPY_FN;
         del_fn.attr_communicator_delete_fn = hcoll_comm_attr_del_fn;
         err = ompi_attr_create_keyval(COMM_ATTR, copy_fn, del_fn, &hcoll_comm_attr_keyval, NULL ,0, NULL);
@@ -381,6 +396,7 @@ mca_coll_hcoll_comm_query(struct ompi_communicator_t *comm, int *priority)
     hcoll_module->super.coll_alltoall = hcoll_collectives.coll_alltoall ? mca_coll_hcoll_alltoall : NULL;
     hcoll_module->super.coll_alltoallv = hcoll_collectives.coll_alltoallv ? mca_coll_hcoll_alltoallv : NULL;
     hcoll_module->super.coll_gatherv = hcoll_collectives.coll_gatherv ? mca_coll_hcoll_gatherv : NULL;
+    hcoll_module->super.coll_scatterv = hcoll_collectives.coll_scatterv ? mca_coll_hcoll_scatterv : NULL;
     hcoll_module->super.coll_reduce = hcoll_collectives.coll_reduce ? mca_coll_hcoll_reduce : NULL;
     hcoll_module->super.coll_ibarrier = hcoll_collectives.coll_ibarrier ? mca_coll_hcoll_ibarrier : NULL;
     hcoll_module->super.coll_ibcast = hcoll_collectives.coll_ibcast ? mca_coll_hcoll_ibcast : NULL;

@@ -15,7 +15,7 @@
  * Copyright (c) 2016-2019 Intel, Inc.  All rights reserved.
  * Copyright (c) 2017-2018 Research Organization for Information Science
  *                         and Technology (RIST). All rights reserved.
- * Copyright (c) 2018      IBM Corporation.  All rights reserved.
+ * Copyright (c) 2018-2019 IBM Corporation.  All rights reserved.
  * $COPYRIGHT$
  *
  * Additional copyrights may follow
@@ -555,7 +555,7 @@ static pmix_status_t setup_listener(pmix_info_t info[], size_t ninfo,
     }
 
     lt = PMIX_NEW(pmix_listener_t);
-    lt->varname = strdup("PMIX_SERVER_URI3:PMIX_SERVER_URI2:PMIX_SERVER_URI21");
+    lt->varname = strdup("PMIX_SERVER_URI4:PMIX_SERVER_URI3:PMIX_SERVER_URI2:PMIX_SERVER_URI21");
     lt->protocol = PMIX_PROTOCOL_V2;
     lt->ptl = (struct pmix_ptl_module_t*)&pmix_ptl_tcp_module;
     lt->cbfunc = connection_handler;
@@ -1351,11 +1351,21 @@ static void connection_handler(int sd, short args, void *cbdata)
                 }
             }
             if (NULL == nptr) {
-                /* we don't know this namespace, reject it */
-                free(msg);
-                /* send an error reply to the client */
-                rc = PMIX_ERR_NOT_FOUND;
-                goto error;
+                /* it is possible that this is a tool inside of
+                 * a job-script as part of a multi-spawn operation.
+                 * Since each tool invocation may have finalized and
+                 * terminated, the tool will appear to "terminate", thus
+                 * causing us to cleanup all references to it, and then
+                 * reappear. So we don't reject this connection request.
+                 * Instead, we create the nspace and rank objects for
+                 * it and let the RM/host decide if this behavior
+                 * is allowed */
+                nptr = PMIX_NEW(pmix_namespace_t);
+                if (NULL == nptr) {
+                    rc = PMIX_ERR_NOMEM;
+                    goto error;
+                }
+                nptr->nspace = strdup(nspace);
             }
             /* now look for the rank */
             info = NULL;
@@ -1367,11 +1377,13 @@ static void connection_handler(int sd, short args, void *cbdata)
                 }
             }
             if (!found) {
-                /* rank unknown, reject it */
-                free(msg);
-                /* send an error reply to the client */
-                rc = PMIX_ERR_NOT_FOUND;
-                goto error;
+                /* see above note about not finding nspace */
+                info = PMIX_NEW(pmix_rank_info_t);
+                info->pname.nspace = strdup(nspace);
+                info->pname.rank = rank;
+                info->uid = pnd->uid;
+                info->gid = pnd->gid;
+                pmix_list_append(&nptr->ranks, &info->super);
             }
             PMIX_RETAIN(info);
             peer->info = info;
@@ -1880,7 +1892,7 @@ static void process_cbfunc(int sd, short args, void *cbdata)
         /* probably cannot send an error reply if we are out of memory */
         return;
     }
-    info->peerid = peer->index;
+    peer->info->peerid = peer->index;
 
     /* start the events for this tool */
     pmix_event_assign(&peer->recv_event, pmix_globals.evbase, peer->sd,
@@ -1906,8 +1918,8 @@ static void cnct_cbfunc(pmix_status_t status,
     pmix_setup_caddy_t *cd;
 
     pmix_output_verbose(2, pmix_ptl_base_framework.framework_output,
-                        "pmix:tcp:cnct_cbfunc returning %s:%d",
-                        proc->nspace, proc->rank);
+                        "pmix:tcp:cnct_cbfunc returning %s:%d %s",
+                        proc->nspace, proc->rank, PMIx_Error_string(status));
 
     /* need to thread-shift this into our context */
     cd = PMIX_NEW(pmix_setup_caddy_t);

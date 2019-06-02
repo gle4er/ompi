@@ -18,8 +18,8 @@ dnl                         reserved.
 dnl Copyright (c) 2009-2011 Oak Ridge National Labs.  All rights reserved.
 dnl Copyright (c) 2011-2013 NVIDIA Corporation.  All rights reserved.
 dnl Copyright (c) 2013-2019 Intel, Inc.  All rights reserved.
-dnl Copyright (c) 2015-2017 Research Organization for Information Science
-dnl                         and Technology (RIST). All rights reserved.
+dnl Copyright (c) 2015-2019 Research Organization for Information Science
+dnl                         and Technology (RIST).  All rights reserved.
 dnl Copyright (c) 2016      Mellanox Technologies, Inc.
 dnl                         All rights reserved.
 dnl
@@ -120,9 +120,11 @@ AC_DEFUN([PMIX_SETUP_CORE],[
     pmixmajor=${PMIX_MAJOR_VERSION}L
     pmixminor=${PMIX_MINOR_VERSION}L
     pmixrelease=${PMIX_RELEASE_VERSION}L
+    pmixnumeric=$(printf 0x%4.4x%2.2x%2.2x $PMIX_MAJOR_VERSION $PMIX_MINOR_VERSION $PMIX_RELEASE_VERSION)
     AC_SUBST(pmixmajor)
     AC_SUBST(pmixminor)
     AC_SUBST(pmixrelease)
+    AC_SUBST(pmixnumeric)
     AC_CONFIG_FILES(pmix_config_prefix[include/pmix_version.h])
 
     PMIX_GREEK_VERSION="`$PMIX_top_srcdir/config/pmix_get_version.sh $PMIX_top_srcdir/VERSION --greek`"
@@ -414,7 +416,7 @@ AC_DEFUN([PMIX_SETUP_CORE],[
                       time.h unistd.h dirent.h \
                       crt_externs.h signal.h \
                       ioLib.h sockLib.h hostLib.h limits.h \
-                      sys/statfs.h sys/statvfs.h \
+                      sys/fcntl.h sys/statfs.h sys/statvfs.h \
                       netdb.h ucred.h zlib.h sys/auxv.h \
                       sys/sysctl.h])
 
@@ -723,8 +725,6 @@ AC_DEFUN([PMIX_SETUP_CORE],[
 
     CFLAGS="$CFLAGS $THREAD_CFLAGS"
     CPPFLAGS="$CPPFLAGS $THREAD_CPPFLAGS"
-    CXXFLAGS="$CXXFLAGS $THREAD_CXXFLAGS"
-    CXXCPPFLAGS="$CXXCPPFLAGS $THREAD_CXXCPPFLAGS"
     LDFLAGS="$LDFLAGS $THREAD_LDFLAGS"
     LIBS="$LIBS $THREAD_LIBS"
 
@@ -734,9 +734,9 @@ AC_DEFUN([PMIX_SETUP_CORE],[
 
     AC_PROG_LN_S
 
+    # Check for some common system programs that we need
     AC_PROG_GREP
     AC_PROG_EGREP
-
 
     ##################################
     # Visibility
@@ -752,9 +752,23 @@ AC_DEFUN([PMIX_SETUP_CORE],[
     ##################################
     # Libevent
     ##################################
-    pmix_show_title "Libevent"
+    pmix_show_title "Event libraries"
 
+    PMIX_LIBEV_CONFIG
     PMIX_LIBEVENT_CONFIG
+
+    AS_IF([test $pmix_libevent_support -eq 1 && test $pmix_libev_support -eq 1],
+      [AC_MSG_WARN([Both libevent and libev support have been specified.])
+       AC_MSG_WARN([Only one can be configured against at a time. Please])
+       AC_MSG_WARN([remove one from the configure command line.])
+       AC_MSG_ERROR([Cannot continue])])
+
+    AS_IF([test $pmix_libevent_support -eq 0 && test $pmix_libev_support -eq 0],
+          [AC_MSG_WARN([Either libevent or libev support is required, but neither])
+           AC_MSG_WARN([was found. Please use the configure options to point us])
+           AC_MSG_WARN([to where we can find one or the other library])
+           AC_MSG_ERROR([Cannot continue])])
+
 
     ##################################
     # HWLOC
@@ -763,13 +777,6 @@ AC_DEFUN([PMIX_SETUP_CORE],[
 
     PMIX_HWLOC_CONFIG
 
-
-    ##################################
-    # ZLIB COMPRESSION
-    ##################################
-    pmix_show_title "ZLIB"
-
-    PMIX_ZLIB_CONFIG
 
     ##################################
     # MCA
@@ -853,6 +860,32 @@ AC_DEFUN([PMIX_SETUP_CORE],[
     AC_SUBST(pmixincludedir)
 
     ############################################################################
+    # setup "make check"
+    ############################################################################
+    PMIX_BUILT_TEST_PREFIX=$PMIX_top_builddir
+    AC_SUBST(PMIX_BUILT_TEST_PREFIX)
+    # expose the mca component library paths in the build system
+    pathfile=$PMIX_top_srcdir/config/mca_library_paths.txt
+    PMIX_COMPONENT_LIBRARY_PATHS=`cat $pathfile`
+    AC_SUBST(PMIX_COMPONENT_LIBRARY_PATHS)
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests00.pl], [chmod +x test/run_tests00.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests01.pl], [chmod +x test/run_tests01.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests02.pl], [chmod +x test/run_tests02.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests03.pl], [chmod +x test/run_tests03.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests04.pl], [chmod +x test/run_tests04.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests05.pl], [chmod +x test/run_tests05.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests06.pl], [chmod +x test/run_tests06.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests07.pl], [chmod +x test/run_tests07.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests08.pl], [chmod +x test/run_tests08.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests09.pl], [chmod +x test/run_tests09.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests10.pl], [chmod +x test/run_tests10.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests11.pl], [chmod +x test/run_tests11.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests12.pl], [chmod +x test/run_tests12.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests13.pl], [chmod +x test/run_tests13.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests14.pl], [chmod +x test/run_tests14.pl])
+    AC_CONFIG_FILES(pmix_config_prefix[test/run_tests15.pl], [chmod +x test/run_tests15.pl])
+
+    ############################################################################
     # final output
     ############################################################################
 
@@ -874,6 +907,7 @@ AC_DEFUN([PMIX_SETUP_CORE],[
         pmix_config_prefix[src/tools/pmix_info/Makefile]
         pmix_config_prefix[src/tools/plookup/Makefile]
         pmix_config_prefix[src/tools/pps/Makefile]
+        pmix_config_prefix[src/tools/pattrs/Makefile]
         )
 
     # publish any embedded flags so external wrappers can use them
@@ -893,6 +927,10 @@ AC_DEFUN([PMIX_DEFINE_ARGS],[
                         [Whether build should attempt to use dlopen (or
                          similar) to dynamically load components.
                          (default: enabled)])])
+    AS_IF([test "$enable_dlopen" = "unknown"],
+          [AC_MSG_WARN([enable_dlopen variable has been overwritten by configure])
+           AC_MSG_WARN([This is an internal error that should be reported to PMIx developers])
+           AC_MSG_ERROR([Cannot continue])])
     AS_IF([test "$enable_dlopen" = "no"],
           [enable_mca_dso="no"
            enable_mca_static="yes"
@@ -908,7 +946,7 @@ AC_DEFUN([PMIX_DEFINE_ARGS],[
     AC_ARG_ENABLE([embedded-mode],
         [AC_HELP_STRING([--enable-embedded-mode],
                 [Using --enable-embedded-mode causes PMIx to skip a few configure checks and install nothing.  It should only be used when building PMIx within the scope of a larger package.])])
-    AS_IF([test ! -z "$enable_embedded_mode" && test "$enable_embedded_mode" = "yes"],
+    AS_IF([test "$enable_embedded_mode" = "yes"],
           [pmix_mode=embedded
            pmix_install_primary_headers=no
            AC_MSG_RESULT([yes])],
@@ -920,8 +958,16 @@ AC_DEFUN([PMIX_DEFINE_ARGS],[
 # Is this a developer copy?
 #
 
-if test -d .git; then
+if test -e $PMIX_TOP_SRCDIR/.git; then
     PMIX_DEVEL=1
+    # check for Flex
+    AC_PROG_LEX
+    if test "x$LEX" != xflex; then
+        AC_MSG_WARN([PMIx requires Flex to build from non-tarball sources,])
+        AC_MSG_WARN([but Flex was not found. Please install Flex into])
+        AC_MSG_WARN([your path and try again])
+        AC_MSG_ERROR([Cannot continue])
+    fi
 else
     PMIX_DEVEL=0
 fi
@@ -972,7 +1018,6 @@ fi
 #################### Early development override ####################
 if test "$WANT_DEBUG" = "0"; then
     CFLAGS="-DNDEBUG $CFLAGS"
-    CXXFLAGS="-DNDEBUG $CXXFLAGS"
 fi
 AC_DEFINE_UNQUOTED(PMIX_ENABLE_DEBUG, $WANT_DEBUG,
                    [Whether we want developer-level debugging code or not])
@@ -1188,6 +1233,24 @@ if test "$WANT_PYTHON_BINDINGS" = "1"; then
     fi
 fi
 
+# see if they want to disable non-RTLD_GLOBAL dlopen
+AC_MSG_CHECKING([if want to support dlopen of non-global namespaces])
+AC_ARG_ENABLE([nonglobal-dlopen],
+              AC_HELP_STRING([--enable-nonglobal-dlopen],
+                             [enable non-global dlopen (default: enabled)]))
+if test "$enable_nonglobal_dlopen" == "no"; then
+    AC_MSG_RESULT([no])
+    pmix_need_libpmix=0
+else
+    AC_MSG_RESULT([yes])
+    pmix_need_libpmix=1
+fi
+
+# if someone enables embedded mode but doesn't want to install the
+# devel headers, then default nonglobal-dlopen to false
+AS_IF([test -z "$enable_nonglobal_dlopen" && test "x$pmix_mode" = "xembedded" && test $WANT_INSTALL_HEADERS -eq 0 && test $pmix_need_libpmix -eq 1],
+      [pmix_need_libpmix=0])
+
 ])dnl
 
 # This must be a standalone routine so that it can be called both by
@@ -1203,6 +1266,7 @@ AC_DEFUN([PMIX_DO_AM_CONDITIONALS],[
         AM_CONDITIONAL([WANT_PRIMARY_HEADERS], [test "x$pmix_install_primary_headers" = "xyes"])
         AM_CONDITIONAL(WANT_INSTALL_HEADERS, test "$WANT_INSTALL_HEADERS" = 1)
         AM_CONDITIONAL(WANT_PMI_BACKWARD, test "$WANT_PMI_BACKWARD" = 1)
+        AM_CONDITIONAL(NEED_LIBPMIX, [test "$pmix_need_libpmix" = "1"])
     ])
     pmix_did_am_conditionals=yes
 ])dnl
