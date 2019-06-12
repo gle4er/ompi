@@ -523,48 +523,50 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
     ompi_datatype_get_extent(datatype, &lb, &extent);
 
     int scatter_count = (count + comm_size - 1) / comm_size; /* ceil(count / comm_size) */
-
-    //TODO: vrank to rank????
-
-    /* Scatter by binomial tree: recieve data from parent processes */
-    for (int mask = 0x1; mask <= vrank; mask <<= 1) {
-        if ((vrank ^ mask) > vrank) {
-            continue;
-        }
-        int recv_rank;
-        VRANK2RANK(recv_rank, (vrank ^ mask), root);
-        int recv_cnt = (vrank == comm_size - 1) 
-            ? count - vrank * scatter_count 
-            : mask * scatter_count;
-        if (recv_cnt > 0) {
-            int res = NBC_Sched_recv((char *)buf + (ptrdiff_t)vrank * scatter_count * extent,
-                    false, recv_cnt, datatype, recv_rank, schedule, true);
-            if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
-                return res;
-            }
-        }
-        break;
+    int count_per_proc[comm_size];
+    count_per_proc[0] = count;
+    for (int i = 1; i < comm_size; i++) {
+        count_per_proc[i] = 0;
     }
 
-    /* Scatter by binomial tree: send data to child processes */
-    for (int mask = 0x1; (mask | vrank) < comm_size; mask <<= 1) {
-        if ((vrank | mask) == vrank) {
-            break;
+    for (int process = 0; process < comm_size; process++) {
+        int max_mask = 1;
+        while (max_mask < comm_size) {
+            if (process & max_mask) {
+                break;
+            }
+            max_mask <<= 1;
         }
-        int send_rank;
-        VRANK2RANK(send_rank, (vrank | mask), root);
-        int send_gap = vrank | mask;
-        int send_cnt = (send_gap == comm_size - 1)
-            ? count - send_gap * scatter_count
-            : mask * scatter_count;
-        if (send_cnt > 0) {
-            int res = NBC_Sched_send((char *)buf + (ptrdiff_t)send_gap * scatter_count * extent,
-                    false, send_cnt, datatype, send_rank, schedule, false);
-            if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
-                return res;
+        for (int mask = max_mask >> 1; mask > 0; mask >>= 1) {
+            int send_count = count_per_proc[process] - scatter_count * mask;
+            int send_rank = (process + mask) % comm_size;
+            int send_gap = process + mask;
+            if (vrank == process && send_count > 0) {
+                int res = NBC_Sched_send((char *)buf + (ptrdiff_t)send_gap * scatter_count * extent,
+                                        false, send_count, datatype, send_rank, schedule, false);
+                if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                    return res;
+                }
+            } else if (vrank == send_rank && send_count > 0) {
+                int res = NBC_Sched_recv((char *)buf + (ptrdiff_t)send_gap * scatter_count * extent,
+                                        false, send_count, datatype, process, schedule, true);
+                if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                    return res;
+                }
+            }
+            if (send_count > 0) {
+                count_per_proc[process] -= send_count;
+                count_per_proc[send_rank] = send_count;
             }
         }
     }
+
+    int res = NBC_Sched_commit (schedule);
+    if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+      OBJ_RELEASE(schedule);
+      return res;
+    }
+    return OMPI_SUCCESS;
 
     /*
      * Allgather by recursive doubling
@@ -617,5 +619,4 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
         }
     }
 
-    return OMPI_SUCCESS;
 }
