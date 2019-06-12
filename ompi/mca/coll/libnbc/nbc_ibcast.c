@@ -511,6 +511,7 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
                                                 void *buf, int count, MPI_Datatype datatype)
 {
     size_t datatype_size;
+    int res;
     ompi_datatype_type_size(datatype, &datatype_size);
     if (comm_size < 2 || datatype_size == 0) {
         return MPI_SUCCESS;
@@ -542,13 +543,13 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
             int send_rank = (process + mask) % comm_size;
             int send_gap = process + mask;
             if (vrank == process && send_count > 0) {
-                int res = NBC_Sched_send((char *)buf + (ptrdiff_t)send_gap * scatter_count * extent,
+                res = NBC_Sched_send((char *)buf + (ptrdiff_t)send_gap * scatter_count * extent,
                                         false, send_count, datatype, send_rank, schedule, false);
                 if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
                     return res;
                 }
             } else if (vrank == send_rank && send_count > 0) {
-                int res = NBC_Sched_recv((char *)buf + (ptrdiff_t)send_gap * scatter_count * extent,
+                res = NBC_Sched_recv((char *)buf + (ptrdiff_t)send_gap * scatter_count * extent,
                                         false, send_count, datatype, process, schedule, true);
                 if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
                     return res;
@@ -561,62 +562,125 @@ static inline int bcast_sched_scatter_allgather(int rank, int comm_size, int roo
         }
     }
 
-    int res = NBC_Sched_commit (schedule);
-    if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
-      OBJ_RELEASE(schedule);
-      return res;
-    }
-    return OMPI_SUCCESS;
-
     /*
      * Allgather by recursive doubling
      * Each process has the curr_count elems in the buf[vrank * scatter_count, ...]
      */
 
-    //TODO: non-power-of-two case
-    int per_rank_count[comm_size];
-    for (int curr_rank = 0; curr_rank < comm_size; curr_rank++) {
-        int rem_count = count - curr_rank * scatter_count;
+    int prev_count_per_proc[comm_size];
+
+    for (int process = 0; process < comm_size; process++) {
+        int rem_count = count - process * scatter_count;
         int curr_count = (scatter_count < rem_count)
             ? scatter_count
             : rem_count;
         if (curr_count < 0)
             curr_count = 0;
-        per_rank_count[curr_rank] = curr_count;
-    }
-
-    for (int mask = 0x1; mask < comm_size; mask <<= 1) {
-        int vremote = vrank ^ mask;
-        int remote = (vremote + root) % comm_size;
-
-        int vrank_tree_root = (int)(vrank / mask) * mask; /* floor(vrank / mask * mask) */
-        int vremote_tree_root = (int)(vremote / mask) * mask;
-
-        if (vremote < comm_size) {
-            ptrdiff_t send_offset = vrank_tree_root * scatter_count * extent;
-            ptrdiff_t recv_offset = vremote_tree_root * scatter_count * extent;
-            int curr_count = per_rank_count[vrank_tree_root];
-            int recv_cnt = per_rank_count[vremote_tree_root];
-            int res = NBC_Sched_send((char *)buf + send_offset, false, curr_count, datatype, remote, schedule, false);
-            if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
-                return res;
-            }
-            res = NBC_Sched_recv((char *)buf + recv_offset, false, recv_cnt, datatype, remote, schedule, true);
-            if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
-                return res;
-            }
-
-            int old_per_rank_count[comm_size];
-            for (int i = 0; i < comm_size; i++) {
-                old_per_rank_count[i] = per_rank_count[i];
-            }
-
-            for (int curr_rank = 0; curr_rank < comm_size; curr_rank++) {
-                int vremote = curr_rank ^ mask;
-                int vremote_tree_root = (int)(vremote / mask) * mask;
-                per_rank_count[curr_rank] += old_per_rank_count[vremote_tree_root];
-            }
+        count_per_proc[process] = curr_count;
+        prev_count_per_proc[process] = curr_count;
+        if (rank == 0) {
+            OPAL_OUTPUT((0, "rank %d, curr_cnt %d", process, curr_count));
         }
     }
 
+    int send_count = 0;
+    for (int mask = 0x1; mask < comm_size; mask <<= 1) {
+        for (int process = 0; process < comm_size; process++) {
+            int vremote = process ^ mask;
+            int remote = (vremote + root) % comm_size;
+
+            int vrank_tree_root = (int)(process / mask) * mask; /* floor(vrank / mask * mask) */
+            int vremote_tree_root = (int)(vremote / mask) * mask;
+
+            if (vremote < comm_size) {
+                ptrdiff_t send_offset = vrank_tree_root * scatter_count * extent;
+
+                send_count = prev_count_per_proc[process];
+                int send_count_alternative = count - vremote_tree_root * scatter_count;
+                if (send_count > send_count_alternative) {
+                    send_count = send_count_alternative;
+                }
+
+                if (send_count > 0) {
+                    if (vrank == process) {
+                        res = NBC_Sched_send((char *)buf + send_offset, false, send_count, datatype,
+                                remote, schedule, false);
+                        if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                            return res;
+                        }
+                        if (vrank == 3) {
+                            OPAL_OUTPUT((0, "1)rank %d, vremote %d, send %d, offset %d", vrank, vremote, send_count, send_offset));
+                        }
+                    } else if (rank == remote) {
+                        res = NBC_Sched_recv((char *)buf + send_offset, false, send_count, datatype, 
+                                process, schedule, false);
+                        if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                            return res;
+                        }
+                        if (vrank == 3) {
+                            OPAL_OUTPUT((0, "1)rank %d, vremote %d, recvd %d, offset %d", vrank, process, send_count, send_offset));
+                        }
+                    }
+                    count_per_proc[vremote] += send_count;
+                } else {
+                    send_count = 0;
+                }
+            }
+
+            if (vremote_tree_root + mask > comm_size) {
+                int nprocs_alldata = comm_size - vrank_tree_root - mask;
+                int offset = scatter_count * (vrank_tree_root + mask);
+                for (int rhalving_mask = mask >> 1; rhalving_mask > 0; rhalving_mask >>= 1) {
+                    vremote = process ^ rhalving_mask;
+                    remote = (vremote + root) % comm_size;
+                    int tree_root = (int)(vremote / (rhalving_mask << 1)) * (rhalving_mask << 1);
+                    /*
+                     * Send only if:
+                     * 1) current process has data: (vremote > vrank) && (vrank < tree_root + nprocs_alldata)
+                     * 2) remote process does not have data at any step: vremote >= tree_root + nprocs_alldata
+                     */
+                    if ((vremote > process) && (process < tree_root + nprocs_alldata)
+                            && (vremote >= tree_root + nprocs_alldata)) {
+                        if (send_count > 0) {
+                            if (vrank == process) {
+                                res = NBC_Sched_send((char *)buf + (ptrdiff_t)offset * extent,
+                                        false, send_count, datatype, remote, schedule, true);
+                                if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                                    return res;
+                                }
+                                if (vrank == 3) {
+                                    OPAL_OUTPUT((0, "2)rank %d, vremote %d, send %d, offset %d", vrank, process, send_count, offset));
+                                }
+                            }
+                            if (rank == remote) {
+                                res = NBC_Sched_recv((char *)buf + (ptrdiff_t)offset * extent,
+                                        false, send_count, datatype, process, schedule, true);
+                                if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+                                    return res;
+                                }
+                                if (vrank == 3) {
+                                    OPAL_OUTPUT((0, "2)rank %d, vremote %d, recvd %d, offset %d", vrank, process, send_count, offset));
+                                }
+                            }
+                            count_per_proc[vremote] += send_count;
+                        }
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < comm_size; i++) {
+            prev_count_per_proc[i] = count_per_proc[i];
+        }
+        res = NBC_Sched_barrier(schedule);
+        if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+            return res;
+        }
+    }
+
+    res = NBC_Sched_commit(schedule);
+    if (OPAL_UNLIKELY(OMPI_SUCCESS != res)) {
+      OBJ_RELEASE(schedule);
+      return res;
+    }
+    return OMPI_SUCCESS;
 }
